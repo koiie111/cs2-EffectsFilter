@@ -15,3 +15,9 @@ public interface IFxFilter
     /// <summary>True if the category is switched off on this server (fx_disable_* cvar): the effect is not created at all.</summary>
     bool IsDisabledOnServer(FxCategory category);
 }
+
+/// <summary>Optional server-wide settings for effects that cannot be filtered per viewer.</summary>
+public interface IFxServerSettings
+{
+    bool RainbowDisabled { get; }
+}
