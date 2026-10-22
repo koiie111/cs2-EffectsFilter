@@ -15,12 +15,12 @@ internal sealed class FxStore(string connection, int serverId)
     {
         await using var db = await Connect();
         // Existing rows always win; the default only applies on the first observation.
+        // No known_players row means a brand-new player (plan, section 7): VIP_Test may insert it after us.
         await using var insert = new MySqlCommand("""
             INSERT IGNORE INTO player_fx_prefs (steam_id64, hide_trails, hide_auras, hide_c4, hide_kill)
             SELECT @steam, n.hidden, n.hidden, n.hidden, n.hidden FROM
-            (SELECT IF(@enabled AND EXISTS(SELECT 1 FROM vip_test_known_players
-            WHERE steam_id64=@steam AND first_seen_at > UTC_TIMESTAMP() - INTERVAL 7 DAY
-            AND first_seen_at <= UTC_TIMESTAMP()),1,0) hidden) n
+            (SELECT IF(@enabled AND NOT EXISTS(SELECT 1 FROM vip_test_known_players
+            WHERE steam_id64=@steam AND first_seen_at <= UTC_TIMESTAMP() - INTERVAL 7 DAY),1,0) hidden) n
             """, db);
         insert.Parameters.AddWithValue("@steam", steam);
         insert.Parameters.AddWithValue("@enabled", newHidden);

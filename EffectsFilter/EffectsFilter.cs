@@ -3,6 +3,7 @@ using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
 using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Menu;
+using CounterStrikeSharp.API.Modules.Timers;
 using FxFilterApi;
 using Microsoft.Extensions.Logging;
 using MySqlConnector;
@@ -43,6 +44,8 @@ public sealed class EffectsFilter : BasePlugin, IPluginConfig<FxConfig>, IFxFilt
         public bool[] Hidden { get; set; } = new bool[4];
         public bool Ready { get; set; }
         public bool Loading { get; set; }
+        public bool InGame { get; set; }
+        public bool HintChecked { get; set; }
     }
     private readonly Dictionary<int, Session> _sessions = new();
     private readonly object _queueLock = new();
@@ -72,7 +75,19 @@ public sealed class EffectsFilter : BasePlugin, IPluginConfig<FxConfig>, IFxFilt
         RegisterListener<Listeners.OnClientAuthorized>((slot, _) =>
         {
             var p = Utilities.GetPlayerFromSlot(slot);
-            if (Valid(p)) Start(p!);
+            // Authorization can arrive after player_connect_full: keep that session.
+            if (Valid(p) && !(_sessions.TryGetValue(slot, out var s) && s.Steam == p!.SteamID)) Start(p!);
+        });
+        // After a map change the client may stay connected without a new OnClientAuthorized.
+        RegisterEventHandler<EventPlayerConnectFull>((ev, _) =>
+        {
+            var p = ev.Userid;
+            if (!Valid(p)) return HookResult.Continue;
+            if (!_sessions.TryGetValue(p!.Slot, out var s) || s.Steam != p.SteamID) s = Start(p);
+            // A map change kills a pending hint timer; the claim in the DB keeps it one-time.
+            s.InGame = true; s.HintChecked = false;
+            TryHint(p, s);
+            return HookResult.Continue;
         });
         RegisterListener<Listeners.OnClientDisconnectPost>(slot => _sessions.Remove(slot));
         RegisterListener<Listeners.OnMapStart>(_ => Server.ExecuteCommand("exec 4ill_fx.cfg"));
@@ -80,7 +95,8 @@ public sealed class EffectsFilter : BasePlugin, IPluginConfig<FxConfig>, IFxFilt
         {
             if (!_active) return;
             Server.ExecuteCommand("exec 4ill_fx.cfg");
-            foreach (var p in Utilities.GetPlayers()) if (Valid(p)) Start(p);
+            foreach (var p in Utilities.GetPlayers())
+                if (Valid(p)) Start(p).InGame = p.Connected == PlayerConnectedState.Connected;
         });
     }
     public override void Unload(bool hotReload) { _active = false; FxFilterProvider.Detach(this); _sessions.Clear(); }
@@ -96,11 +112,12 @@ public sealed class EffectsFilter : BasePlugin, IPluginConfig<FxConfig>, IFxFilt
             catch (Exception e) { Logger.LogError(e, "EffectsFilter database operation failed"); }
         }, TaskScheduler.Default).Unwrap();
     }
-    private void Start(CCSPlayerController p)
+    private Session Start(CCSPlayerController p)
     {
         var s = new Session(p.SteamID);
         _sessions[p.Slot] = s;
         LoadPrefs(p, s);
+        return s;
     }
     private void LoadPrefs(CCSPlayerController p, Session s)
     {
@@ -116,7 +133,7 @@ public sealed class EffectsFilter : BasePlugin, IPluginConfig<FxConfig>, IFxFilt
                 {
                     if (!Current(p, s)) return;
                     s.Hidden = hidden; s.Ready = true; s.Loading = false;
-                    ClaimHint(p, s);
+                    TryHint(p, s);
                 });
             }
             catch
@@ -126,14 +143,25 @@ public sealed class EffectsFilter : BasePlugin, IPluginConfig<FxConfig>, IFxFilt
             }
         });
     }
-    private void ClaimHint(CCSPlayerController p, Session s) => Enqueue(async () =>
+    // The hint is claimed once globally, so print it only to a fully connected player:
+    // chat sent during OnClientAuthorized is lost on the loading screen.
+    private void TryHint(CCSPlayerController p, Session s)
     {
-        var claimed = await _store.ClaimHint(s.Steam);
-        if (claimed) Server.NextWorldUpdate(() => { if (Current(p, s)) p.PrintToChat(Hint); });
-    });
+        if (!s.Ready || !s.InGame || s.HintChecked) return;
+        s.HintChecked = true;
+        AddTimer(5f, () =>
+        {
+            if (!Current(p, s)) { s.HintChecked = false; return; }
+            Enqueue(async () =>
+            {
+                var claimed = await _store.ClaimHint(s.Steam);
+                if (claimed) Server.NextWorldUpdate(() => { if (Current(p, s)) p.PrintToChat(Hint); });
+            });
+        }, TimerFlags.STOP_ON_MAPCHANGE);
+    }
     private void Open(CCSPlayerController p, bool record)
     {
-        if (!_sessions.TryGetValue(p.Slot, out var s) || s.Steam != p.SteamID) { Start(p); return; }
+        if (!_sessions.TryGetValue(p.Slot, out var s) || s.Steam != p.SteamID) s = Start(p);
         if (!s.Ready) { LoadPrefs(p, s); p.PrintToChat("[4ILL] Настройки загружаются. Повтори !fx через несколько секунд."); return; }
         if (record) Enqueue(() => _store.Record(s.Steam, "menu_open"));
         var menu = new CenterHtmlMenu("Чужие эффекты", this);

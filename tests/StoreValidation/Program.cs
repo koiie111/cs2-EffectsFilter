@@ -24,7 +24,7 @@ Check((await store.Load(76561198000000002, true)).All(x => x), "opt-in new-playe
 Check(!(await store.Load(76561198000000003, true)).Any(x => x), "old player stays visible");
 Check(!(await store.Load(76561198000000004, false)).Any(x => x), "default disabled for newcomers");
 Check(!(await store.Load(76561198000000005, true)).Any(x => x), "exact seven-day cutoff excluded");
-Check(!(await store.Load(76561198000000006, true)).Any(x => x), "unknown first_seen stays visible");
+Check((await store.Load(76561198000000006, true)).All(x => x), "player missing from known_players is new");
 Check(!(await otherServer.Load(76561198000000004, true)).Any(x => x), "existing preference wins over new default");
 var hints = await Task.WhenAll(store.ClaimHint(76561198000000001), otherServer.ClaimHint(76561198000000001));
 Check(hints.Count(x => x) == 1, "concurrent servers claim hint once");
